@@ -15,8 +15,12 @@
 | --- | --- |
 | `router_socks.py` | 仅监听 `127.0.0.1` 的 SOCKS5 TCP CONNECT 服务 |
 | `client-script.js` | 添加本地 SOCKS 节点和内网规则的 `main(config)` 配置脚本 |
-| `start.command` | 后台启动服务，记录日志和 PID |
-| `stop.command` | 停止本目录启动的服务 |
+| `service_control.py` | 安装、管理当前用户的 macOS LaunchAgent |
+| `start.command` | 启动服务；首次运行自动安装自启和进程守护 |
+| `stop.command` | 暂停服务，下次登录仍可自启 |
+| `enable-autostart.command` | 安装或更新登录自启与退出重启 |
+| `disable-autostart.command` | 停止服务并移除登录自启 |
+| `status.command` | 查看服务状态、PID、配置与日志路径 |
 | `test.command` | 通过 SOCKS 测试指定 HTTP / HTTPS 地址 |
 
 ## 环境要求
@@ -27,27 +31,59 @@
 
 ## 1. 启动 SOCKS 服务
 
-默认参数为物理网卡 `en1`、路由器 DNS `192.168.1.1`、端口 `10808`：
+默认自动检测物理网卡，路由器 DNS 为 `192.168.1.1`，端口为 `10808`：
 
 ```bash
 ./start.command
 ```
 
-也可以按自己的网络传入参数：
+首次运行会安装当前用户的 LaunchAgent，立即启动服务，并启用登录自启与进程退出后重启。无需管理员权限。也可以双击 `start.command`。
+
+自动检测优先选择通往路由器的物理网卡，排除 TUN、回环和虚拟网卡；检测不到物理网卡时保持监听，等待新连接时重试。默认每隔至少 5 秒在新连接时重新检测，Wi-Fi / 有线切换后新连接会使用重新选中的网卡。已经建立的 TCP 连接不会自动迁移。
+
+可明确指定 `auto`、路由器 DNS 和端口：
 
 ```bash
-./start.command en0 192.168.50.1 10808
+./enable-autostart.command auto 192.168.50.1 10808
 ```
 
-双击 `start.command` 时使用脚本中的默认值。查看网卡可以运行 `networksetup -listallhardwareports`，也可以运行 `route -n get <路由器地址>` 查看到路由器的物理接口。更换网卡、路由器或端口前，先运行 `./stop.command`。
-
-前台运行可使用：
+也可以固定物理网卡，例如：
 
 ```bash
-python3 router_socks.py --interface en1 --router-dns 192.168.1.1 --port 10808
+./enable-autostart.command en0 192.168.50.1 10808
 ```
 
-前台服务按 Ctrl+C 停止。后台服务写入 `socks.log`、`socks.pid`，这两个文件由 Git 忽略。可用 `PYTHON_BIN` 指定 Python 解释器。
+传入新参数会更新安装的服务配置并重启。自动检测只选择网卡，路由器 DNS 地址仍需配置。多个物理网卡无法确定出口时，服务会提示指定网卡，避免把流量送回 TUN。
+
+### 自启与进程守护
+
+- 自启在当前用户登录 macOS 时触发。
+- `launchd` 使用 `KeepAlive` 在进程退出或被结束后重新启动；失败重启使用 5 秒节流，避免快速重复启动。
+- PID 锁避免同一服务重复运行；SIGTERM 会释放监听和 PID。
+- `stop.command` 通过卸载当前运行的 LaunchAgent 暂停服务，避免守护进程立刻把它拉起。下次登录仍会启动。
+- `disable-autostart.command` 停止服务并移除登录自启配置，之后可以通过 `start.command` 重新安装。
+
+```bash
+./status.command
+./status.command --json
+./stop.command
+./start.command
+./disable-autostart.command
+```
+
+服务代码安装到 `~/Library/Application Support/macos-router-socks/`，自启配置位于 `~/Library/LaunchAgents/io.github.ardenyu11.router-socks.plist`。安装后服务使用独立副本，移动仓库不会影响已安装的运行文件。更新代码后再次运行 `./enable-autostart.command`，会重新复制代码并重启。
+
+日志和 PID 也位于该 Application Support 目录，`socks.log` 每份 2 MiB、保留 3 份轮转备份。运行 `status.command` 可查看具体路径。配置保存在该目录的 `settings.json`。关闭自启会保留配置和日志。
+
+如已有旧版后台服务占用了端口，先使用旧版的停止脚本退出，再安装新版自启。新安装不会终止占用端口的其他进程。
+
+也可以仅在终端前台运行服务，不安装自启：
+
+```bash
+python3 router_socks.py --interface auto --router-dns 192.168.1.1 --port 10808
+```
+
+前台服务按 Ctrl+C 停止，PID 写在脚本旁边。可用 `PYTHON_BIN` 为管理脚本指定 Python 解释器。
 
 ## 2. 配置客户端脚本
 
@@ -88,7 +124,8 @@ python3 router_socks.py --interface en1 --router-dns 192.168.1.1 --port 10808
 日志应出现：
 
 ```text
-DNS <内网域名> via <路由器地址> on physical interface -> <真实内网 IP>
+Physical interface selected: <物理网卡> (<索引>), router DNS=<路由器地址>
+DNS <内网域名> via <路由器地址> on <物理网卡> -> <真实内网 IP>
 CONNECT <内网域名>:443 -> <真实内网 IP>:443 via <物理网卡>
 ```
 
@@ -105,4 +142,12 @@ CONNECT <内网域名>:443 -> <真实内网 IP>:443 via <物理网卡>
 - 收到真实 IP 时直接连接。收到 `198.18.0.0/15` 的 Fake-IP 时返回明确错误，因为本地服务不能独立恢复客户端的 Fake-IP 映射；客户端需要发送原域名或真实地址。
 - 绑定物理网卡绕过 TUN 已在实际环境验证。换网络或客户端改变 TUN 实现后，需要重新测试。
 
-已验证 TUN 开启时路由器 DNS 解析、内网 HTTPS、真实 IP CONNECT 和公网 HTTPS；客户端脚本接入后，浏览器访问公司内网也已通过。
+已验证 TUN 开启时自动检测物理网卡、路由器 DNS 解析、内网 HTTPS 和公网 HTTPS，以及强制结束进程后由 `launchd` 拉起并恢复访问。客户端脚本接入后的浏览器内网访问已在先前版本验证。
+
+测试网卡选择、网络中断与切换、PID 锁和 LaunchAgent 配置：
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+`launchd` 守护处理进程退出后的重启；不会终止一个仍在运行但无响应的进程。
